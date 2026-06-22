@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CLONES_DIR = ROOT_DIR / "clones"
+MAIN_ENV_FILE = ROOT_DIR / ".env"
 CLONE_COUNT = 10
 BASE_PORT = 1000
 HOST = "0.0.0.0"
@@ -49,3 +50,24 @@ def public_path(base_path: str, suffix: str = "") -> str:
     if base_path == "/":
         return f"/{suffix}" if suffix else "/"
     return f"{base_path}/{suffix}" if suffix else base_path
+
+
+def load_project_env() -> dict[str, str]:
+    if not MAIN_ENV_FILE.exists():
+        return {}
+    return parse_env_file(MAIN_ENV_FILE)
+
+
+def env_get(values: dict[str, str], key: str, default: str | None = None) -> str | None:
+    key_lower = key.lower()
+    for existing_key, value in values.items():
+        if existing_key.lower() == key_lower:
+            return value
+    return default
+
+
+def env_bool(values: dict[str, str], key: str, default: bool = False) -> bool:
+    value = env_get(values, key)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}

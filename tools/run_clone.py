@@ -19,9 +19,23 @@ from typing import Any
 from urllib.parse import quote, urlparse, urlsplit
 from urllib.request import Request, urlopen
 
-from common import DEFAULT_VIEWPORT, HOST, normalize_route_path, parse_env_file, public_path
+from common import (
+    DEFAULT_VIEWPORT,
+    HOST,
+    ROOT_DIR,
+    env_bool,
+    env_get,
+    load_project_env,
+    normalize_route_path,
+    parse_env_file,
+    public_path,
+)
 
 MAX_BODY_BYTES = 64 * 1024
+AUTO_LOGIN_DONE_FILE = "auto-login.done"
+AUTO_LOGIN_FAILED_FILE = "auto-login.failed"
+AUTO_LOGIN_RUNNING_FILE = "auto-login.running"
+DEFAULT_AUTO_LOGIN_URL = "https://pro-siv.interieur.gouv.fr/map-ppa-ui/do/home"
 
 
 class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
@@ -462,6 +476,96 @@ class BrowserManager:
                 self.process.kill()
 
 
+def reset_auto_login_markers(clone_dir: Path) -> None:
+    logs_dir = clone_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    for name in [AUTO_LOGIN_DONE_FILE, AUTO_LOGIN_FAILED_FILE, AUTO_LOGIN_RUNNING_FILE]:
+        marker = logs_dir / name
+        if marker.exists():
+            marker.unlink()
+
+
+def write_auto_login_marker(clone_dir: Path, name: str, message: str) -> None:
+    logs_dir = clone_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / name).write_text(message, encoding="utf-8")
+
+
+def int_config(config: dict[str, str], key: str, default: int) -> int:
+    value = env_get(config, key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def run_auto_login(clone_dir: Path, manager: BrowserManager, config: dict[str, str]) -> None:
+    script_name = env_get(config, "AUTO_LOGIN_SCRIPT", "Login-SIV.ps1") or "Login-SIV.ps1"
+    script_path = Path(script_name)
+    if not script_path.is_absolute():
+        script_path = ROOT_DIR / script_path
+
+    if not script_path.exists():
+        raise FileNotFoundError(f"Auto-login script was not found: {script_path}")
+
+    if not manager.process:
+        raise RuntimeError("Chromium process is not available for auto-login")
+
+    timeout_seconds = int_config(config, "AUTO_LOGIN_TIMEOUT_SECONDS", 90)
+    certificate_delay_ms = int_config(config, "AUTO_LOGIN_CERTIFICATE_DELAY_MS", 800)
+    url = env_get(config, "AUTO_LOGIN_URL", DEFAULT_AUTO_LOGIN_URL) or DEFAULT_AUTO_LOGIN_URL
+    logs_dir = clone_dir / "logs"
+    stdout_log = logs_dir / "auto-login.out.log"
+    stderr_log = logs_dir / "auto-login.err.log"
+    chromium = find_chromium_executable()
+
+    if manager.cdp:
+        manager.cdp.send("Page.navigate", {"url": url}, wait=False)
+
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script_path),
+        "-Url",
+        url,
+        "-ChromeExecutable",
+        str(chromium),
+        "-UserDataDir",
+        str(clone_dir / "profile"),
+        "-DiskCacheDir",
+        str(clone_dir / "cache"),
+        "-BrowserProcessId",
+        str(manager.process.pid),
+        "-CertificateDelayMs",
+        str(certificate_delay_ms),
+        "-UseExistingBrowserWindow",
+    ]
+
+    write_auto_login_marker(clone_dir, AUTO_LOGIN_RUNNING_FILE, f"started {time.time()}\n")
+    try:
+        with stdout_log.open("w", encoding="utf-8") as stdout, stderr_log.open("w", encoding="utf-8") as stderr:
+            result = subprocess.run(
+                command,
+                cwd=ROOT_DIR,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=timeout_seconds,
+                check=False,
+            )
+    finally:
+        running_marker = logs_dir / AUTO_LOGIN_RUNNING_FILE
+        if running_marker.exists():
+            running_marker.unlink()
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Auto-login failed with exit code {result.returncode}. See {stderr_log}")
+
+
 def find_chromium_executable() -> Path:
     env_path = os.environ.get("CHROMIUM_EXECUTABLE")
     candidates: list[Path] = []
@@ -819,14 +923,26 @@ async def run(args: argparse.Namespace) -> None:
     if not env_file.exists():
         raise FileNotFoundError(f"Missing .env file: {env_file}")
 
+    project_env = load_project_env()
     env = parse_env_file(env_file)
     port = int(env["PORT"])
     base_path = normalize_route_path(env.get("PATH"))
     clone_name = clone_dir.name
+    reset_auto_login_markers(clone_dir)
 
     hub = FrameHub()
     manager = BrowserManager(clone_dir, hub)
     manager.start()
+
+    if env_bool(project_env, "AUTO_LOGIN", False):
+        print(f"[{clone_name}] Auto-login started.", flush=True)
+        try:
+            run_auto_login(clone_dir, manager, project_env)
+            write_auto_login_marker(clone_dir, AUTO_LOGIN_DONE_FILE, f"completed {time.time()}\n")
+            print(f"[{clone_name}] Auto-login completed.", flush=True)
+        except Exception as exc:
+            write_auto_login_marker(clone_dir, AUTO_LOGIN_FAILED_FILE, f"{exc}\n")
+            print(f"[{clone_name}] Auto-login failed: {exc}", file=sys.stderr, flush=True)
 
     handler = make_handler(manager, hub, base_path, clone_name)
     server = ExclusiveThreadingHTTPServer((HOST, port), handler)

@@ -52,6 +52,29 @@ You can also run the per-clone launcher:
 .\clones\chromium-01\launch.ps1
 ```
 
+## Auto Login
+
+The project-level `.env` controls optional SIV auto-login:
+
+```env
+AUTO_LOGIN=true
+AUTO_LOGIN_SCRIPT=Login-SIV.ps1
+AUTO_LOGIN_URL=https://pro-siv.interieur.gouv.fr/map-ppa-ui/do/home
+AUTO_LOGIN_TIMEOUT_SECONDS=90
+AUTO_LOGIN_CERTIFICATE_DELAY_MS=800
+```
+
+When `AUTO_LOGIN=true`, every clone launch runs `Login-SIV.ps1` against that clone's own Chromium window and profile. `run_all.py` starts clones one by one and waits for each clone's auto-login result before opening the next clone.
+
+Auto-login logs and markers are written per clone:
+
+```text
+clones/chromium-01/logs/auto-login.out.log
+clones/chromium-01/logs/auto-login.err.log
+clones/chromium-01/logs/auto-login.done
+clones/chromium-01/logs/auto-login.failed
+```
+
 ## URLs
 
 Each clone has a unique `.env`:
