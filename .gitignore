@@ -1,0 +1,10 @@
+node_modules/
+playwright-report/
+test-results/
+__pycache__/
+*.pyc
+clones/*/profile/
+clones/*/cache/
+clones/*/downloads/
+clones/*/logs/
+*.log
